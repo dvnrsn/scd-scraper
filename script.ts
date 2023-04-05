@@ -1,12 +1,17 @@
 import * as cheerio from "cheerio";
+import * as fs from "fs";
 
 import sqlite3 from "sqlite3";
+import { createSource } from "./source";
 
 const db = new sqlite3.Database("food.sqlite");
 
-db.run("PRAGMA foreign_keys = ON");
+const data = fs.readFileSync("./all.json", "utf8");
+
+const { ingredients } = JSON.parse(data);
 
 db.serialize(() => {
+  db.run("PRAGMA foreign_keys = ON");
   db.run(
     `CREATE TABLE IF NOT EXISTS ingredient (ingredient_id INTEGER PRIMARY KEY, name TEXT NOT NULL);`
   );
@@ -19,56 +24,63 @@ db.serialize(() => {
     id INTEGER PRIMARY KEY,
     legal BOOLEAN CHECK (legal IN (0, 1)), 
     description TEXT,
+    url TEXT,
     ingredient_id INTEGER NOT NULL,
     source_id INTEGER NOT NULL,
     FOREIGN KEY (ingredient_id) REFERENCES ingredient(ingredient_id) ON DELETE CASCADE,
     FOREIGN KEY (source_id) REFERENCES source(source_id) ON DELETE CASCADE
   );`);
-});
 
-const fetchWithLetter = async (letter) => {
-  const source = `https://www.scdrecipe.com/legal-illegal-list/view-all-alpha/all/${letter}`;
-  const a = await fetch(source);
-  const b = await a.text();
-  return b;
-};
+  const insertIngredient = "INSERT INTO ingredient (name) VALUES (?)";
+  const insertSourceOnIngredient =
+    'INSERT INTO source_on_ingredient (legal, description, ingredient_id, source_id) VALUES (?, ?, ?, (SELECT source_id FROM source WHERE name = "SCD Recipe"))';
 
-const getText = async () => {
-  const text = await fetchWithLetter("A");
-  const $ = cheerio.load(text);
+  db.run("DELETE FROM source");
+  db.run("DELETE FROM ingredient;");
+  db.run("DELETE FROM source_on_ingredient;");
 
-  type FoodItems = {
-    name: string;
-    legal: boolean | "*";
-    description: string;
-    source: string;
-  };
-  const foodItems: FoodItems[] = [];
+  createSource(
+    db,
+    "SCD Recipe",
+    "https://www.scdrecipe.com/legal-illegal-list/listing/all"
+  );
 
-  $("table tr").each((_, el) => {
-    const display = $(el).css("display");
-    if (display == "none") return;
-
-    const name = $(el)
-      .children()
-      .eq(0)
-      .text()
-      .replace(/\(\d*\)/, "")
-      .trim();
-    const legalString = $(el).children().eq(1).text().trim();
-    const description = $(el).children().eq(2).text().trim();
-
-    const legal =
-      legalString == "LEGAL" ? true : legalString == "ILLEGAL" ? false : "*";
-    foodItems.push({
-      name,
-      legal,
-      description,
-      source: `https://www.scdrecipe.com/legal-illegal-list/view-all-alpha/all/A`,
-    });
+  ingredients.forEach((ingredient) => {
+    db.run(
+      "INSERT INTO ingredient (name) VALUES (?)",
+      [ingredient.name],
+      function (err) {
+        if (err) {
+          console.log(err.message);
+        } else {
+          const ingredientId = this.lastID;
+          // Insert the source information and ingredient_id into the "source_on_ingredient" table
+          db.run(
+            "INSERT INTO source_on_ingredient (legal, description, url, ingredient_id, source_id) VALUES (?, ?, ?, ?, ?)",
+            [
+              typeof ingredient.legal != "boolean"
+                ? null
+                : ingredient.legal
+                ? 1
+                : 0,
+              ingredient.description,
+              ingredient.source,
+              ingredientId,
+              1,
+            ],
+            function (err) {
+              if (err) {
+                console.log(err.message);
+              } else {
+                console.log(`Inserted ingredient "${ingredient.name}"`);
+              }
+            }
+          );
+        }
+      }
+    );
   });
-  return foodItems;
-};
+});
 
 // const foodItems = await getText();
 
@@ -89,5 +101,3 @@ const getText = async () => {
 //   });
 //   db.run("END TRANSACTION");
 // });
-
-db.close();
